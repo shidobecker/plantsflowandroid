@@ -16,13 +16,20 @@
 
 package com.example.android.advancedcoroutines
 
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.switchMap
-import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.*
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.ConflatedBroadcastChannel
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+
+/**
+ * A flow is an asynchronous version of a Sequence, a type of collection whose values are lazily produced. Just like a sequence, a
+ * flow produces each value on-demand whenever the value is needed, and flows can contain an infinite number of values.
+
+So, why did Kotlin introduce a new Flow type, and how is it different than a regular sequence? The answer lies in the magic of async. Flow includes
+full support for coroutines. That means you can build, transform, and consume aFlow using coroutines.
+You can also control concurrency, which means coordinating the execution of several coroutines declaratively with Flow.
+ */
 
 /**
  * The [ViewModel] for fetching a list of [Plant]s.
@@ -30,6 +37,46 @@ import kotlinx.coroutines.launch
 class PlantListViewModel internal constructor(
     private val plantRepository: PlantRepository
 ) : ViewModel() {
+
+
+    /**
+     * This defines a new ConflatedBroadcastChannel. This is a special kind of coroutine-based value holder that holds only the last value
+     * it was given. It's a thread-safe concurrency primitive, so you can write to it from multiple threads at the same time
+     * (and whichever is considered "last" will win).
+
+    You can also subscribe to get updates to the current value. Overall, it has the similar behavior to a LiveData–it just holds the last
+    value and lets you observe changes to it. However, unlike LiveData, you have to use coroutines to read values on multiple threads.
+
+    A ConflatedBroadcastChannel is often a good way to insert events into a flow. It provides a concurrency primitive (or low-level tool)
+    for passing values between several coroutines.
+
+    By conflating the events, we keep track of only the most recent event. This is often the correct thing to do, since UI events may come in
+    faster than processing, and we usually don't care about intermediate values.
+
+    If you do need to pass all events between coroutines and don't want conflation, consider using a Channel which offers the semantics of a
+    BlockingQueue using suspend functions. The channelFlow builder can be used to make channel backed flows.
+     */
+    private val growZoneChannel = ConflatedBroadcastChannel<GrowZone>()
+
+
+    /**
+     * Since flow offers main-safety and the ability to cancel, you can choose to pass the
+     * Flow all the way through to the UI layer without converting it to a LiveData.
+     * However, for this codelab we will stick to using LiveData in the UI layer.
+
+    Also in the ViewModel, add a cache update to the init block. This step is optional for now,
+    but if you clear your cache and don't add this call, you will not see any data in the app.
+     */
+    val plantsUsingFlow: LiveData<List<Plant>> =
+        growZoneChannel.asFlow()
+            .flatMapLatest { growZone -> //Flow's flatMapLatest extensions allow you to switch between multiple flows.
+                if (growZone == NoGrowZone) {
+                    plantRepository.plantsFlow
+                } else {
+                    plantRepository.getPlantsWithGrowZoneFlow(growZone)
+                }
+            }.asLiveData()
+
 
     /**
      * Request a snackbar to display a string.
@@ -48,6 +95,7 @@ class PlantListViewModel internal constructor(
         get() = _snackbar
 
     private val _spinner = MutableLiveData<Boolean>(false)
+
     /**
      * Show a loading spinner if true
      */
@@ -72,7 +120,41 @@ class PlantListViewModel internal constructor(
 
     init {
         // When creating a new ViewModel, clear the grow zone and perform any related udpates
-        clearGrowZoneNumber()
+        clearGrowZoneNumber()  // keep this
+
+        // fetch the full plant list
+        // launchDataLoad { plantRepository.tryUpdateRecentPlantsCache() }
+
+
+        //This code will launch a new coroutine to observe the values sent to growZoneChannel.
+        // You can comment out the network calls in the methods below now as they're only needed for the LiveData version
+
+        loadDataFor(growZoneChannel) { growZone ->
+            _spinner.value = true
+            if (growZone == NoGrowZone) {
+                plantRepository.tryUpdateRecentPlantsCache()
+            } else {
+                plantRepository.tryUpdateRecentPlantsForGrowZoneCache(growZone)
+            }
+        }
+        /*  growZoneChannel.asFlow()
+              .mapLatest { growZone ->
+                  _spinner.value = true
+                  if (growZone == NoGrowZone) {
+                      plantRepository.tryUpdateRecentPlantsCache()
+                  } else {
+                      plantRepository.tryUpdateRecentPlantsForGrowZoneCache(growZone)
+                  }
+              }
+              .onCompletion { _spinner.value = false }
+              .catch { throwable -> _snackbar.value = throwable.message }
+              .launchIn(viewModelScope)*/
+    }
+
+    fun <T> loadDataFor(source: ConflatedBroadcastChannel<T>, block: suspend (T) -> Unit) {
+        source.asFlow().mapLatest { block(source.value) }.onCompletion { _spinner.value = false }
+            .catch { throwable -> _snackbar.value = throwable.message }
+            .launchIn(viewModelScope)
     }
 
     /**
@@ -83,9 +165,11 @@ class PlantListViewModel internal constructor(
      */
     fun setGrowZoneNumber(num: Int) {
         growZone.value = GrowZone(num)
+        growZoneChannel.offer(GrowZone(num))
 
-        // initial code version, will move during flow rewrite
-        launchDataLoad { plantRepository.tryUpdateRecentPlantsCache() }
+        /* launchDataLoad {
+            plantRepository.tryUpdateRecentPlantsForGrowZoneCache(GrowZone(num))
+        }*/
     }
 
     /**
@@ -93,12 +177,18 @@ class PlantListViewModel internal constructor(
      *
      * In the starter code version, this will also start a network request. After refactoring,
      * updating the grow zone will automatically kickoff a network request.
+     *
+     *
+     * To let the channel know about the filter change, we can call offer.
+     * This is a regular (non-suspending) function, and it's an easy way to communicate an event into a coroutine like we're doing here.
      */
     fun clearGrowZoneNumber() {
         growZone.value = NoGrowZone
+        growZoneChannel.offer(NoGrowZone)
 
-        // initial code version, will move during flow rewrite
-        launchDataLoad { plantRepository.tryUpdateRecentPlantsCache() }
+        launchDataLoad {
+            plantRepository.tryUpdateRecentPlantsCache()
+        }
     }
 
     /**

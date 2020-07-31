@@ -49,6 +49,8 @@ class PlantListFragment : Fragment() {
         val binding = FragmentPlantListBinding.inflate(inflater, container, false)
         context ?: return binding.root
 
+        //THIS MIGHT REMOVE DATA STATE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
         // show the spinner when [spinner] is true
         viewModel.spinner.observe(viewLifecycleOwner) { show ->
             binding.spinner.visibility = if (show) View.VISIBLE else View.GONE
@@ -85,7 +87,7 @@ class PlantListFragment : Fragment() {
     }
 
     private fun subscribeUi(adapter: PlantAdapter) {
-        viewModel.plants.observe(viewLifecycleOwner) { plants ->
+        viewModel.plantsUsingFlow.observe(viewLifecycleOwner) { plants ->
             adapter.submitList(plants)
         }
     }
